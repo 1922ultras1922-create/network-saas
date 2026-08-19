@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Учёт пробега</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; font-family: 'Segoe UI', sans-serif; }
+        body { background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%); min-height:100vh; padding:20px; display:flex; justify-content:center; align-items:center; }
+        .container { max-width:1200px; width:100%; background:rgba(255,255,255,0.85); backdrop-filter:blur(10px); border-radius:30px; padding:30px; box-shadow:0 20px 60px rgba(0,0,0,0.2); }
+        h1 { text-align:center; color:#1a2a3a; font-size:2.5rem; margin-bottom:5px; }
+        h1 i { color:#e74c3c; }
+        .subtitle { text-align:center; color:#555; margin-bottom:30px; }
+        .greeting { text-align:center; font-size:1.1rem; margin-bottom:20px; color:#2c3e50; }
+        .stats { display:flex; justify-content:space-around; flex-wrap:wrap; gap:15px; margin-bottom:30px; }
+        .stat-item { background:white; padding:15px 25px; border-radius:20px; box-shadow:0 5px 15px rgba(0,0,0,0.08); flex:1 1 150px; text-align:center; }
+        .stat-item .number { font-size:2rem; font-weight:700; color:#2c3e50; }
+        .stat-item .label { font-size:0.9rem; color:#7f8c8d; }
+        .status-section { margin-bottom:30px; }
+        .status-section h3 { margin-bottom:10px; color:#2c3e50; }
+        .status-cards { display:flex; flex-wrap:wrap; gap:15px; }
+        .status-card { background:white; border-radius:16px; padding:15px 20px; min-width:180px; flex:1 1 180px; box-shadow:0 4px 12px rgba(0,0,0,0.08); transition:0.2s; }
+        .status-card:hover { transform:translateY(-3px); box-shadow:0 6px 20px rgba(0,0,0,0.12); }
+        .status-card .title { font-weight:600; font-size:1.1rem; }
+        .status-card .info { font-size:0.9rem; color:#555; margin:5px 0; }
+        .status-card .bar { margin-top:8px; background:#ecf0f1; border-radius:20px; height:8px; overflow:hidden; }
+        .status-card .bar-fill { height:100%; border-radius:20px; }
+        .status-card .status-text { font-size:0.8rem; color:#7f8c8d; margin-top:4px; }
+        .form-card { background:white; border-radius:20px; padding:25px; box-shadow:0 5px 20px rgba(0,0,0,0.05); margin-bottom:30px; }
+        .form-row { display:flex; flex-wrap:wrap; gap:15px; align-items:end; }
+        .form-group { flex:1 1 140px; }
+        .form-group label { display:block; font-size:0.9rem; font-weight:600; color:#2c3e50; margin-bottom:5px; }
+        .form-group input, .form-group select { width:100%; padding:12px 15px; border:2px solid #ecf0f1; border-radius:12px; font-size:1rem; transition:0.3s; background:#fafafa; }
+        .form-group input:focus, .form-group select:focus { border-color:#3498db; outline:none; background:white; }
+        .btn-add { background:linear-gradient(135deg, #6dd5fa, #2980b9); color:white; border:none; padding:12px 30px; border-radius:50px; font-size:1.1rem; font-weight:700; cursor:pointer; transition:0.3s; display:flex; align-items:center; gap:8px; margin-top:22px; }
+        .btn-add:hover { transform:scale(1.05); box-shadow:0 10px 25px rgba(41,128,185,0.3); }
+        .action-bar { display:flex; gap:15px; flex-wrap:wrap; margin-bottom:25px; align-items:center; }
+        .btn-check { background:linear-gradient(135deg, #f093fb, #f5576c); color:white; border:none; padding:10px 25px; border-radius:50px; font-weight:700; cursor:pointer; transition:0.3s; display:flex; align-items:center; gap:8px; }
+        .btn-check:hover { transform:scale(1.05); box-shadow:0 10px 25px rgba(245,87,108,0.3); }
+        .btn-chat { background:linear-gradient(135deg, #4facfe, #00f2fe); color:white; border:none; padding:10px 25px; border-radius:50px; font-weight:700; cursor:pointer; transition:0.3s; display:flex; align-items:center; gap:8px; }
+        .btn-chat:hover { transform:scale(1.05); box-shadow:0 10px 25px rgba(79,172,254,0.3); }
+        .filter-bar { display:flex; align-items:center; gap:15px; margin-bottom:25px; flex-wrap:wrap; }
+        .filter-bar label { font-weight:600; color:#2c3e50; }
+        .filter-bar select { padding:10px 20px; border-radius:30px; border:2px solid #ecf0f1; background:white; font-size:1rem; cursor:pointer; }
+        .records-container { background:white; border-radius:20px; overflow:hidden; box-shadow:0 5px 20px rgba(0,0,0,0.05); }
+        table { width:100%; border-collapse:collapse; }
+        th { background:#2c3e50; color:white; font-weight:600; padding:15px; text-align:left; }
+        td { padding:15px; border-bottom:1px solid #ecf0f1; vertical-align:middle; }
+        tr:hover td { background:#f8f9fa; }
+        .badge { display:inline-block; padding:4px 12px; border-radius:30px; background:#3498db; color:white; font-size:0.8rem; font-weight:600; }
+        .badge-oil { background:#e67e22; }
+        .badge-car { background:#2ecc71; }
+        .btn-delete { background:none; border:none; color:#e74c3c; font-size:1.2rem; cursor:pointer; transition:0.2s; padding:5px 10px; border-radius:8px; }
+        .btn-delete:hover { background:#e74c3c; color:white; transform:scale(1.1); }
+        .empty-msg { text-align:center; padding:40px; color:#bdc3c7; font-size:1.2rem; }
+        .modal { display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.5); justify-content:center; align-items:center; }
+        .modal-content { background:white; border-radius:20px; max-width:500px; width:90%; max-height:80vh; padding:20px; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,0.3); }
+        .modal-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; }
+        .modal-header h2 { margin:0; }
+        .close { cursor:pointer; font-size:1.5rem; }
+        .chat-messages { flex:1; overflow-y:auto; max-height:300px; border:1px solid #eee; border-radius:12px; padding:10px; margin-bottom:15px; background:#f9f9f9; }
+        .chat-messages div { margin:5px 0; }
+        .user-msg { text-align:right; color:#2c3e50; }
+        .bot-msg { text-align:left; color:#2980b9; }
+        .chat-input { display:flex; gap:10px; }
+        .chat-input input { flex:1; padding:10px; border:2px solid #ecf0f1; border-radius:12px; }
+        .chat-input button { background:#3498db; color:white; border:none; padding:10px 20px; border-radius:12px; cursor:pointer; }
+        .chat-input button:disabled { opacity:0.5; }
+
+        @media (max-width:768px) {
+            .container { padding:15px; }
+            .form-row { flex-direction:column; }
+            .form-group { flex:1 1 100%; }
+            .btn-add { width:100%; justify-content:center; }
+            .stats .stat-item { flex:1 1 100%; }
+            .action-bar { flex-direction:column; align-items:stretch; }
+            table, thead, tbody, th, td, tr { display:block; }
+            thead { display:none; }
+            tr { margin-bottom:15px; border:1px solid #ecf0f1; border-radius:12px; padding:10px; }
+            td { border:none; padding:8px 12px; display:flex; justify-content:space-between; }
+            td::before { content:attr(data-label); font-weight:600; color:#2c3e50; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1><i class="fas fa-car"></i> Учёт пробега</h1>
+    <div class="greeting"><i class="fas fa-user-circle"></i> Привет, Сергей! Ваш ID: 8130365822</div>
+    <div class="subtitle"><i class="fas fa-wrench"></i> Ведите учёт по каждому автомобилю</div>
+
+    <div class="stats" id="stats">
+        <div class="stat-item"><div class="number" id="totalRecords">0</div><div class="label">Всего записей</div></div>
+        <div class="stat-item"><div class="number" id="totalMileage">0</div><div class="label">Общий пробег (макс.)</div></div>
+        <div class="stat-item"><div class="number" id="avgMileage">0</div><div class="label">Средний пробег</div></div>
+    </div>
+
+    <!-- Блок состояния узлов -->
+    <div class="status-section">
+        <h3><i class="fas fa-heartbeat"></i> Мониторинг состояния</h3>
+        <div class="status-cards" id="statusCards">
+            <p>Загрузка...</p>
+        </div>
+    </div>
+
+    <div class="form-card">
+        <div class="form-row">
+            <div class="form-group">
+                <label><i class="fas fa-tachometer-alt"></i> Пробег (км)</label>
+                <input type="number" id="mileage" placeholder="15000" min="0">
+            </div>
+            <div class="form-group">
+                <label><i class="fas fa-car"></i> Автомобиль</label>
+                <input type="text" id="carInput" placeholder="Lada Priora" list="carList">
+                <datalist id="carList"></datalist>
+            </div>
+            <div class="form-group">
+                <label><i class="fas fa-cogs"></i> Узел</label>
+                <select id="partSelect">
+                    <option value="Двигатель">Двигатель</option>
+                    <option value="Подвеска">Подвеска</option>
+                    <option value="Трансмиссия">Трансмиссия</option>
+                    <option value="Электрика">Электрика</option>
+                    <option value="Тормозная система">Тормозная система</option>
+                    <option value="Кузов">Кузов</option>
+                    <option value="Салон">Салон</option>
+                    <option value="Рулевое управление">Рулевое управление</option>
+                    <option value="Охлаждение">Охлаждение</option>
+                    <option value="Топливная система">Топливная система</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label><i class="fas fa-tag"></i> Тип работы</label>
+                <select id="typeSelect">
+                    <option value="Другое">Другое</option>
+                    <option value="Замена масла">Замена масла</option>
+                    <option value="Замена воздушного фильтра">Замена воздушного фильтра</option>
+                    <option value="Замена топливного фильтра">Замена топливного фильтра</option>
+                    <option value="Замена свечей">Замена свечей</option>
+                    <option value="Замена ремня ГРМ">Замена ремня ГРМ</option>
+                    <option value="Замена тормозных колодок">Замена тормозных колодок</option>
+                    <option value="Замена охлаждающей жидкости">Замена охлаждающей жидкости</option>
+                    <option value="Замена тормозной жидкости">Замена тормозной жидкости</option>
+                    <option value="Замена трансмиссионного масла">Замена трансмиссионного масла</option>
+                    <option value="Ремонт">Ремонт</option>
+                    <option value="Плановое ТО">Плановое ТО</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label><i class="fas fa-pencil-alt"></i> Что сделано</label>
+                <input type="text" id="description" placeholder="Замена масла">
+            </div>
+            <button class="btn-add" onclick="addRecord()"><i class="fas fa-plus-circle"></i> Добавить</button>
+        </div>
+    </div>
+
+    <div class="action-bar">
+        <button class="btn-check" onclick="checkNow()"><i class="fas fa-bell"></i> Проверить сейчас</button>
+        <button class="btn-chat" onclick="openChat()"><i class="fas fa-robot"></i> AI-совет</button>
+    </div>
+
+    <div class="filter-bar">
+        <label for="filterCar"><i class="fas fa-filter"></i> Автомобиль:</label>
+        <select id="filterCar" onchange="renderRecords()">
+            <option value="all">Все авто</option>
+        </select>
+        <label for="filterPart" style="margin-left:15px;"><i class="fas fa-cogs"></i> Узел:</label>
+        <select id="filterPart" onchange="renderRecords()">
+            <option value="all">Все узлы</option>
+            <option value="Двигатель">Двигатель</option>
+            <option value="Подвеска">Подвеска</option>
+            <option value="Трансмиссия">Трансмиссия</option>
+            <option value="Электрика">Электрика</option>
+            <option value="Тормозная система">Тормозная система</option>
+            <option value="Кузов">Кузов</option>
+            <option value="Салон">Салон</option>
+            <option value="Рулевое управление">Рулевое управление</option>
+            <option value="Охлаждение">Охлаждение</option>
+            <option value="Топливная система">Топливная система</option>
+        </select>
+    </div>
+
+    <div class="records-container">
+        <div id="recordsList">
+            <div class="empty-msg">Загрузка...</div>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно AI-чата -->
+<div id="chatModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2><i class="fas fa-robot"></i> AI-советник</h2>
+            <span class="close" onclick="closeChat()">&times;</span>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+            <div class="bot-msg">Здравствуйте! Я помогу с обслуживанием вашего авто. Спросите что-нибудь.</div>
+        </div>
+        <div class="chat-input">
+            <input type="text" id="chatInput" placeholder="Напишите вопрос..." onkeypress="if(event.key==='Enter') sendChat()">
+            <button onclick="sendChat()" id="chatSendBtn">Отправить</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- Глобальные переменные ---
+    let allRecords = [];
+
+    // --- Загрузка списка автомобилей ---
+    async function loadCars() {
+        const res = await fetch('/api/cars');
+        const cars = await res.json();
+        const datalist = document.getElementById('carList');
+        datalist.innerHTML = '';
+        cars.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c;
+            datalist.appendChild(opt);
+        });
+        const select = document.getElementById('filterCar');
+        const currentVal = select.value;
+        select.innerHTML = '<option value="all">Все авто</option>';
+        cars.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c;
+            opt.textContent = c;
+            select.appendChild(opt);
+        });
+        if (currentVal && cars.includes(currentVal)) select.value = currentVal;
+        else select.value = 'all';
+    }
+
+    // --- Статистика ---
+    function updateStats(records) {
+        document.getElementById('totalRecords').textContent = records.length;
+        let sum = records.reduce((s, r) => s + r.mileage, 0);
+        let max = records.length ? Math.max(...records.map(r => r.mileage)) : 0;
+        document.getElementById('totalMileage').textContent = max;
+        let avg = records.length ? Math.round(sum / records.length) : 0;
+        document.getElementById('avgMileage').textContent = avg;
+    }
+
+    // --- Отображение записей ---
+    async function renderRecords() {
+        const container = document.getElementById('recordsList');
+        const filterCar = document.getElementById('filterCar').value;
+        const filterPart = document.getElementById('filterPart').value;
+        try {
+            const res = await fetch('/api/records');
+            allRecords = await res.json();
+            let filtered = allRecords;
+            if (filterCar !== 'all') filtered = filtered.filter(r => r.car === filterCar);
+            if (filterPart !== 'all') filtered = filtered.filter(r => r.part === filterPart);
+            updateStats(filtered);
+            if (filtered.length === 0) {
+                container.innerHTML = '<div class="empty-msg"><i class="fas fa-inbox"></i> Нет записей</div>';
+                return;
+            }
+            let html = `<table><thead><tr><th>#</th><th>Пробег</th><th>Авто</th><th>Узел</th><th>Тип</th><th>Действие</th><th>Дата</th><th></th></tr></thead><tbody>`;
+            filtered.forEach((r, i) => {
+                let typeBadge = r.type === 'Замена масла' ? 'badge-oil' : '';
+                html += `<tr>
+                    <td data-label="#"><strong>${i+1}</strong></td>
+                    <td data-label="Пробег">${r.mileage} км</td>
+                    <td data-label="Авто"><span class="badge badge-car">${r.car || 'не указано'}</span></td>
+                    <td data-label="Узел"><span class="badge">${r.part}</span></td>
+                    <td data-label="Тип"><span class="badge ${typeBadge}">${r.type || 'Другое'}</span></td>
+                    <td data-label="Действие">${r.description}</td>
+                    <td data-label="Дата">${r.dateLocale || r.date}</td>
+                    <td data-label=""><button class="btn-delete" onclick="deleteRecord(${r.id})"><i class="fas fa-trash-alt"></i></button></td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        } catch (e) {
+            container.innerHTML = '<div class="empty-msg">Ошибка загрузки данных</div>';
+            console.error(e);
+        }
+    }
+
+    // --- Загрузка статуса узлов ---
+    async function loadStatus() {
+        const container = document.getElementById('statusCards');
+        try {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            container.innerHTML = '';
+            for (const [type, info] of Object.entries(data)) {
+                const card = document.createElement('div');
+                card.className = 'status-card';
+                const statusIcon = info.status === 'good' ? '✅' : info.status === 'warning' ? '⚠️' : info.status === 'critical' ? '🔴' : info.status === 'overdue' ? '🚨' : '❌';
+                const color = info.status === 'good' ? '#27ae60' : info.status === 'warning' ? '#f39c12' : info.status === 'critical' ? '#e67e22' : '#e74c3c';
+                card.style.borderLeft = `6px solid ${color}`;
+                const statusText = info.status === 'good' ? '✅ В норме' : info.status === 'warning' ? '⚠️ Скоро замена' : info.status === 'critical' ? '🔴 Критично' : info.status === 'overdue' ? '🚨 Просрочено!' : '❌ Не заменялось';
+                const kmLeft = info.kmLeft !== null ? info.kmLeft : '?';
+                const daysLeft = info.daysLeft !== null ? info.daysLeft : '?';
+                const percent = info.percent || 0;
+                card.innerHTML = `
+                    <div class="title">${statusIcon} ${type}</div>
+                    <div class="info">${info.lastMileage ? `Последний пробег: ${info.lastMileage} км` : 'Нет данных'}</div>
+                    <div class="info">${info.lastDate ? `Дата: ${info.lastDate}` : ''}</div>
+                    <div class="info">Остаток: ${kmLeft} км / ${daysLeft} дн.</div>
+                    <div class="bar"><div class="bar-fill" style="width:${100 - percent}%;background:${color};"></div></div>
+                    <div class="status-text">${statusText} (${percent}%)</div>
+                `;
+                container.appendChild(card);
+            }
+        } catch (e) {
+            container.innerHTML = '<p>Ошибка загрузки статуса</p>';
+            console.error(e);
+        }
+    }
+
+    // --- Добавление записи ---
+    async function addRecord() {
+        const mileage = parseInt(document.getElementById('mileage').value);
+        const car = document.getElementById('carInput').value.trim();
+        const part = document.getElementById('partSelect').value;
+        const type = document.getElementById('typeSelect').value;
+        const description = document.getElementById('description').value.trim();
+        if (isNaN(mileage) || mileage < 0) {
+            alert('Введите корректный пробег');
+            return;
+        }
+        if (!car) {
+            alert('Введите название автомобиля');
+            return;
+        }
+        if (!description) {
+            alert('Введите описание');
+            return;
+        }
+        const res = await fetch('/api/records', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mileage, description, part, type, car })
+        });
+        if (res.ok) {
+            document.getElementById('mileage').value = '';
+            document.getElementById('description').value = '';
+            await loadCars();
+            renderRecords();
+            loadStatus();
+        } else {
+            alert('Ошибка добавления');
+        }
+    }
+
+    // --- Удаление ---
+    async function deleteRecord(id) {
+        if (!confirm('Удалить запись?')) return;
+        const res = await fetch(`/api/records/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+            await loadCars();
+            renderRecords();
+            loadStatus();
+        } else {
+            alert('Ошибка удаления');
+        }
+    }
+
+    // --- Проверить сейчас ---
+    async function checkNow() {
+        const btn = document.querySelector('.btn-check');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Проверка...';
+        try {
+            const res = await fetch('/api/check-reminders', { method: 'POST' });
+            const data = await res.json();
+            alert(`Проверено ${data.checked} авто, отправлено уведомлений: ${data.notifications}`);
+        } catch (e) {
+            alert('Ошибка при проверке');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-bell"></i> Проверить сейчас';
+        }
+    }
+
+    // --- AI-чат ---
+    function openChat() {
+        document.getElementById('chatModal').style.display = 'flex';
+        document.getElementById('chatInput').focus();
+    }
+    function closeChat() {
+        document.getElementById('chatModal').style.display = 'none';
+    }
+    async function sendChat() {
+        const input = document.getElementById('chatInput');
+        const msg = input.value.trim();
+        if (!msg) return;
+        const messagesDiv = document.getElementById('chatMessages');
+        messagesDiv.innerHTML += `<div class="user-msg"><strong>Вы:</strong> ${msg}</div>`;
+        input.value = '';
+        const sendBtn = document.getElementById('chatSendBtn');
+        sendBtn.disabled = true;
+        sendBtn.textContent = 'Отправка...';
+        let car = document.getElementById('filterCar').value;
+        if (car === 'all') car = document.getElementById('carInput').value.trim() || 'неизвестно';
+        try {
+            const res = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: msg, car })
+            });
+            const data = await res.json();
+            if (data.reply) {
+                messagesDiv.innerHTML += `<div class="bot-msg"><strong>AI:</strong> ${data.reply}</div>`;
+            } else {
+                messagesDiv.innerHTML += `<div class="bot-msg"><strong>AI:</strong> Ошибка, попробуйте позже.</div>`;
+            }
+        } catch (e) {
+            messagesDiv.innerHTML += `<div class="bot-msg"><strong>AI:</strong> Не удалось получить ответ.</div>`;
+        }
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Отправить';
+    }
+
+    window.onclick = function(event) {
+        const modal = document.getElementById('chatModal');
+        if (event.target === modal) closeChat();
+    };
+
+    // --- Инициализация ---
+    (async function init() {
+        await loadCars();
+        renderRecords();
+        loadStatus();
+    })();
+</script>
+</body>
+</html>
