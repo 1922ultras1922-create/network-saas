@@ -3,23 +3,27 @@ const express = require('express');
 const path = require('path');
 const axios = require('axios');
 const { MongoClient } = require('mongodb');
+const crypto = require('crypto');
+const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-// force redeploy 2025-03-20
+
 app.use(express.json());
 app.use(express.static('public'));
 
-// --- Конфиги из .env ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const OIL_CHANGE_KM = parseInt(process.env.OIL_CHANGE_KM) || 10000;
-const OIL_CHANGE_DAYS = parseInt(process.env.OIL_CHANGE_DAYS) || 180;
-const YANDEX_API_KEY = process.env.YANDEX_API_KEY;
-const YANDEX_FOLDER_ID = process.env.YANDEX_FOLDER_ID;
+const GIGACHAT_CREDENTIALS = process.env.GIGACHAT_CREDENTIALS;
 
-// --- MongoDB ---
-const DB_URL = process.env.DATABASE_URL; // ваша строка подключения
+const CHECK_INTERVAL_HOURS = parseInt(process.env.CHECK_INTERVAL_HOURS) || 6;
+const REMINDER_TYPES = [
+    { type: 'Замена масла', km: parseInt(process.env.OIL_CHANGE_KM) || 10000, days: parseInt(process.env.OIL_CHANGE_DAYS) || 180 },
+    { type: 'Замена фильтра', km: parseInt(process.env.FILTER_CHANGE_KM) || 15000, days: parseInt(process.env.FILTER_CHANGE_DAYS) || 365 },
+    { type: 'Замена ремня ГРМ', km: parseInt(process.env.BELT_CHANGE_KM) || 60000, days: parseInt(process.env.BELT_CHANGE_DAYS) || 0 },
+].filter(t => t.km > 0 || t.days > 0);
+
+const DB_URL = process.env.DATABASE_URL;
 const DB_NAME = process.env.DB_NAME || 'mileage';
 let db;
 
@@ -39,10 +43,8 @@ async function connectDB() {
     }
 }
 
-// --- Функции работы с данными (асинхронные) ---
 async function loadRecords() {
     if (!db) {
-        // fallback на JSON (для локальной разработки без MongoDB)
         try {
             const fs = require('fs');
             const data = fs.readFileSync(path.join(__dirname, 'records.json'), 'utf8');
@@ -58,7 +60,6 @@ async function saveRecords(records) {
         fs.writeFileSync(path.join(__dirname, 'records.json'), JSON.stringify(records, null, 2));
         return;
     }
-    // Полная замена коллекции (проще для начала)
     await db.collection('records').deleteMany({});
     if (records.length > 0) {
         await db.collection('records').insertMany(records);
@@ -71,7 +72,6 @@ async function getCars() {
     return Array.from(cars);
 }
 
-// --- Telegram ---
 async function sendTelegramMessage(message) {
     if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return false;
     try {
@@ -102,13 +102,15 @@ function sendFullReport(records) {
         sorted.forEach(r => {
             message += `  • ${r.mileage} км | ${r.part} | ${r.type} | ${r.description} (${r.dateLocale})\n`;
         });
-        const last = getLastOilChange(carRecords);
-        if (last) {
-            const currentMileage = Math.max(...carRecords.map(r => r.mileage));
-            const kmDiff = currentMileage - last.mileage;
-            const daysDiff = Math.floor((Date.now() - new Date(last.date)) / (1000*60*60*24));
-            if (kmDiff >= OIL_CHANGE_KM || daysDiff >= OIL_CHANGE_DAYS) {
-                message += `  ⚠️ <b>Нужна замена масла!</b> (пробег с замены: ${kmDiff} км, дней: ${daysDiff})\n`;
+        for (const t of REMINDER_TYPES) {
+            const last = getLastWork(carRecords, t.type);
+            if (last) {
+                const currentMileage = Math.max(...carRecords.map(r => r.mileage));
+                const kmDiff = currentMileage - last.mileage;
+                const daysDiff = Math.floor((Date.now() - new Date(last.date)) / (1000*60*60*24));
+                if ((t.km > 0 && kmDiff >= t.km) || (t.days > 0 && daysDiff >= t.days)) {
+                    message += `  ⚠️ <b>Нужна ${t.type}!</b> (пробег с замены: ${kmDiff} км, дней: ${daysDiff})\n`;
+                }
             }
         }
         message += "\n";
@@ -119,54 +121,49 @@ function sendFullReport(records) {
     sendTelegramMessage(message);
 }
 
-function getLastOilChange(records) {
-    const oilChanges = records
-        .filter(r => r.type === 'Замена масла')
-        .sort((a, b) => new Date(b.date) - new Date(a.date));
-    return oilChanges.length ? oilChanges[0] : null;
+function getLastWork(records, type) {
+    const filtered = records.filter(r => r.type === type);
+    if (filtered.length === 0) return null;
+    return filtered.sort((a, b) => new Date(b.date) - new Date(a.date))[0];
 }
 
-function checkOilChangeAndNotify(records, car) {
-    const last = getLastOilChange(records);
-    if (!last) return false;
+function checkAllReminders(records, car) {
+    let notified = false;
+    for (const t of REMINDER_TYPES) {
+        const last = getLastWork(records, t.type);
+        if (!last) continue;
+        const now = new Date();
+        const lastDate = new Date(last.date);
+        const daysDiff = Math.floor((now - lastDate) / (1000 * 60 * 60 * 24));
+        const currentMileage = records.length ? Math.max(...records.map(r => r.mileage)) : last.mileage;
+        const kmDiff = currentMileage - last.mileage;
+        let needNotify = false;
+        let reason = '';
+        if (t.km > 0 && kmDiff >= t.km) {
+            needNotify = true;
+            reason = `пробег с замены ${kmDiff} км (лимит ${t.km} км)`;
+        } else if (t.days > 0 && daysDiff >= t.days) {
+            needNotify = true;
+            reason = `прошло ${daysDiff} дней (лимит ${t.days} дней)`;
+        }
+        if (needNotify) {
+            const msg = `⚠️ <b>Напоминание о ${t.type} (${car})</b>
 
-    const now = new Date();
-    const lastDate = new Date(last.date);
-    const daysDiff = Math.floor((now - lastDate) / (1000 * 60 * 60 * 24));
-    const lastMileage = last.mileage;
-    const currentMileage = records.length ? Math.max(...records.map(r => r.mileage)) : lastMileage;
-    const kmDiff = currentMileage - lastMileage;
-
-    let needNotify = false;
-    let reason = '';
-    if (kmDiff >= OIL_CHANGE_KM) {
-        needNotify = true;
-        reason = `пробег с замены ${kmDiff} км (лимит ${OIL_CHANGE_KM} км)`;
-    } else if (daysDiff >= OIL_CHANGE_DAYS) {
-        needNotify = true;
-        reason = `прошло ${daysDiff} дней (лимит ${OIL_CHANGE_DAYS} дней)`;
-    }
-
-    if (needNotify) {
-        const msg = `
-⚠️ <b>Напоминание о замене масла (${car})</b>
-
-Последняя замена: ${last.dateLocale}
-Пробег на замене: ${lastMileage} км
+Последняя ${t.type}: ${last.dateLocale}
+Пробег на тот момент: ${last.mileage} км
 Текущий пробег: ${currentMileage} км
-Пробег после замены: ${kmDiff} км
+Пробег после: ${kmDiff} км
 Дней прошло: ${daysDiff}
 
 Причина: ${reason}
-Рекомендуется заменить масло.
-        `.trim();
-        sendTelegramMessage(msg);
-        return true;
+Рекомендуется выполнить ${t.type}.`;
+            sendTelegramMessage(msg);
+            notified = true;
+        }
     }
-    return false;
+    return notified;
 }
 
-// --- API маршруты ---
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -200,9 +197,8 @@ app.post('/api/records', async (req, res) => {
     records.push(newRecord);
     await saveRecords(records);
     res.status(201).json(newRecord);
-
     const carRecords = records.filter(r => r.car === car);
-    checkOilChangeAndNotify(carRecords, car);
+    checkAllReminders(carRecords, car);
 });
 
 app.delete('/api/records/:id', async (req, res) => {
@@ -220,23 +216,43 @@ app.post('/api/check-reminders', async (req, res) => {
     const records = await loadRecords();
     const cars = await getCars();
     let notifications = 0;
-
     sendFullReport(records);
-
     for (const car of cars) {
         const carRecords = records.filter(r => r.car === car);
-        const notified = checkOilChangeAndNotify(carRecords, car);
+        const notified = checkAllReminders(carRecords, car);
         if (notified) notifications++;
     }
     res.json({ success: true, checked: cars.length, notifications });
 });
 
-// --- AI-чат (YandexGPT) ---
+// --- AI-чат (GigaChat с автоподбором модели) ---
+function emulateAI(message, car) {
+    const lowerMsg = message.toLowerCase();
+    if (lowerMsg.includes('масло') || lowerMsg.includes('замена масла')) {
+        return `Для автомобиля ${car} рекомендую менять масло каждые 10 000 км или раз в год. Учитывая текущий пробег, проверьте последнюю замену в ваших записях.`;
+    }
+    if (lowerMsg.includes('фильтр')) {
+        return `Рекомендуется менять воздушный фильтр каждые 15 000 км, а салонный — раз в год. Для ${car} лучше придерживаться регламента производителя.`;
+    }
+    if (lowerMsg.includes('ремонт') || lowerMsg.includes('поломка')) {
+        return `Для диагностики ${car} лучше обратиться к специалисту. Проверьте коды ошибок через OBD-адаптер.`;
+    }
+    if (lowerMsg.includes('приора') || lowerMsg.includes('lada')) {
+        return `Для Lada Priora рекомендуется регулярно проверять состояние подвески и тормозной системы. Средний ресурс тормозных колодок — 30–40 тыс. км.`;
+    }
+    return `По вашему вопросу "${message}" для ${car} рекомендую ознакомиться с руководством по эксплуатации или обратиться к профессиональному автомеханику.`;
+}
+
+const GIGA_MODELS = ['GigaChat-2-Pro', 'GigaChat'];
+
 app.post('/api/chat', async (req, res) => {
     const { message, car } = req.body;
     if (!message) return res.status(400).json({ error: 'Сообщение обязательно' });
-    if (!YANDEX_API_KEY || !YANDEX_FOLDER_ID) {
-        return res.status(500).json({ error: 'YandexGPT не настроен' });
+
+    if (!GIGACHAT_CREDENTIALS) {
+        console.warn('⚠️ GIGACHAT_CREDENTIALS не задан, используется эмуляция.');
+        const reply = emulateAI(message, car);
+        return res.json({ reply });
     }
 
     const records = await loadRecords();
@@ -256,51 +272,95 @@ app.post('/api/chat', async (req, res) => {
 ${context}
 Дай полезный, краткий совет (не более 3 предложений).`;
 
+    const agent = new https.Agent({ rejectUnauthorized: false });
+
     try {
-        const response = await axios.post(
-            'https://llm.api.cloud.yandex.net/foundationModels/v1/completion',
+        // Получаем access_token
+        const authResponse = await axios.post(
+            'https://ngw.devices.sberbank.ru:9443/api/v2/oauth',
+            'scope=GIGACHAT_API_PERS',
             {
-                modelUri: `gpt://${YANDEX_FOLDER_ID}/yandexgpt-lite/latest`,
-                completionOptions: { stream: false, temperature: 0.5, maxTokens: 200 },
-                messages: [
-                    { role: 'system', text: 'Ты — автоэксперт, отвечай кратко и по делу.' },
-                    { role: 'user', text: prompt }
-                ]
-            },
-            { headers: { 'Authorization': `Api-Key ${YANDEX_API_KEY}`, 'Content-Type': 'application/json' } }
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Accept': 'application/json',
+                    'RqUID': crypto.randomUUID(),
+                    'Authorization': `Bearer ${GIGACHAT_CREDENTIALS}`
+                },
+                httpsAgent: agent
+            }
         );
-        const reply = response.data.result.alternatives[0].message.text;
+        const accessToken = authResponse.data.access_token;
+
+        // Пробуем модели по очереди
+        for (const model of GIGA_MODELS) {
+            try {
+                const chatResponse = await axios.post(
+                    'https://gigachat.devices.sberbank.ru/api/v1/chat/completions',
+                    {
+                        model: model,
+                        messages: [
+                            { role: 'system', content: 'Ты — автоэксперт, отвечай кратко и по делу.' },
+                            { role: 'user', content: prompt }
+                        ],
+                        temperature: 0.5,
+                        max_tokens: 200
+                    },
+                    {
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                            'Authorization': `Bearer ${accessToken}`
+                        },
+                        httpsAgent: agent
+                    }
+                );
+                const reply = chatResponse.data.choices[0]?.message?.content || 'Нет ответа';
+                return res.json({ reply });
+            } catch (error) {
+                console.error(`Модель ${model} не сработала:`, error.response?.data?.message || error.message);
+            }
+        }
+
+        // Если все модели не сработали
+        console.warn('⚠️ Все модели GigaChat недоступны, используется эмуляция.');
+        const reply = emulateAI(message, car);
         res.json({ reply });
     } catch (error) {
-        console.error('YandexGPT error:', error.response?.data || error.message);
-        res.status(500).json({ error: 'Ошибка AI-сервиса' });
+        console.error('GigaChat auth error:', error.response?.data || error.message);
+        const reply = emulateAI(message, car);
+        res.json({ reply });
     }
 });
 
-// --- Планировщик (каждые 6 часов) ---
+const CHECK_INTERVAL_MS = CHECK_INTERVAL_HOURS * 60 * 60 * 1000;
 setInterval(async () => {
     const records = await loadRecords();
     const cars = await getCars();
     for (const car of cars) {
         const carRecords = records.filter(r => r.car === car);
-        checkOilChangeAndNotify(carRecords, car);
+        checkAllReminders(carRecords, car);
     }
-}, 6 * 60 * 60 * 1000);
+}, CHECK_INTERVAL_MS);
 
 setTimeout(async () => {
     const records = await loadRecords();
     const cars = await getCars();
     for (const car of cars) {
         const carRecords = records.filter(r => r.car === car);
-        checkOilChangeAndNotify(carRecords, car);
+        checkAllReminders(carRecords, car);
     }
 }, 5000);
 
-// --- Запуск сервера после подключения к БД ---
 connectDB().then(() => {
     app.listen(PORT, () => {
         console.log(`🚀 Сервер запущен на порту ${PORT}`);
-        console.log(`📏 Пороги: ${OIL_CHANGE_KM} км или ${OIL_CHANGE_DAYS} дней`);
+        console.log(`📏 Интервал проверки: ${CHECK_INTERVAL_HOURS} ч`);
+        console.log(`📋 Типы напоминаний: ${REMINDER_TYPES.map(t => t.type).join(', ')}`);
+        if (GIGACHAT_CREDENTIALS) {
+            console.log('🤖 GigaChat AI подключён (будет выбрана доступная модель)');
+        } else {
+            console.warn('⚠️ GIGACHAT_CREDENTIALS не задан, AI-чат работает в режиме эмуляции');
+        }
     });
 }).catch(err => {
     console.error('Не удалось запустить сервер:', err);
