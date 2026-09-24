@@ -90,10 +90,15 @@ async function sendTelegramMessage(message) {
 }
 
 function getLastWork(records, type) {
-    const filtered = records.filter(r =>
-        (r.type && r.type.toLowerCase().includes(type.toLowerCase())) ||
-        (r.description && r.description.toLowerCase().includes(type.toLowerCase()))
-    );
+    const filtered = records.filter(r => {
+        const searchText = [
+            r.type,
+            r.description,
+            r.part,
+            r.component
+        ].filter(Boolean).join(' ').toLowerCase();
+        return searchText.includes(type.toLowerCase().replace('замена ', ''));
+    });
     if (filtered.length === 0) return null;
     return filtered.sort((a, b) => new Date(b.date) - new Date(a.date))[0];
 }
@@ -134,6 +139,10 @@ function checkAllReminders(records, car) {
     }
     return notified;
 }
+
+// ============================================================
+// МАРШРУТЫ
+// ============================================================
 
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -234,32 +243,23 @@ app.post('/api/status', async (req, res) => {
 
 app.get('/api/status', async (req, res) => {
     try {
-        const collection = await getStatusCollection();
-        let status = null;
-
-        if (collection) {
-            status = await collection.findOne({}, { sort: { timestamp: -1 } });
-        } else if (global.lastStatus) {
-            status = global.lastStatus;
-        }
-
-        if (!status) {
-            return res.json({
-                success: false,
-                message: 'Нет данных мониторинга. Подключите OBD2Manual.'
-            });
-        }
-
-        // === РАСЧЁТ ОСТАТКА ДО ЗАМЕНЫ МАСЛА ===
+        // === 1. Расчёт масла ===
         const records = await loadRecords();
         const currentMileage = records.length
             ? Math.max(...records.map(r => r.mileage))
             : 0;
 
-        const oilChanges = records.filter(r =>
-            (r.type && r.type.toLowerCase().includes('масл')) ||
-            (r.description && r.description.toLowerCase().includes('масл'))
-        );
+        // Универсальный фильтр — ищет "масл" во всех текстовых полях
+        const oilChanges = records.filter(r => {
+            const searchText = [
+                r.type,
+                r.description,
+                r.part,
+                r.component,
+                r.car
+            ].filter(Boolean).join(' ').toLowerCase();
+            return searchText.includes('масл');
+        });
         const lastOilChange = oilChanges.length
             ? oilChanges.sort((a, b) => new Date(b.date) - new Date(a.date))[0]
             : null;
@@ -272,7 +272,11 @@ app.get('/api/status', async (req, res) => {
             kmRemaining: null,
             percentUsed: null,
             lastChangeDate: null,
-            status: 'unknown'
+            status: 'unknown',
+            debug: {
+                totalRecords: records.length,
+                oilChangesFound: oilChanges.length
+            }
         };
 
         if (lastOilChange) {
@@ -289,6 +293,26 @@ app.get('/api/status', async (req, res) => {
             if (kmRemaining <= 0) oilInfo.status = 'overdue';
             else if (kmRemaining <= 500) oilInfo.status = 'soon';
             else oilInfo.status = 'ok';
+        }
+
+        // === 2. Статус мониторинга ===
+        const collection = await getStatusCollection();
+        let status = null;
+
+        if (collection) {
+            status = await collection.findOne({}, { sort: { timestamp: -1 } });
+        } else if (global.lastStatus) {
+            status = global.lastStatus;
+        }
+
+        if (!status) {
+            return res.json({
+                success: true,
+                stale: true,
+                message: 'Нет данных мониторинга. Подключите OBD2Manual.',
+                data: null,
+                oil: oilInfo
+            });
         }
 
         const age = Date.now() - new Date(status.timestamp).getTime();
@@ -318,7 +342,10 @@ app.post('/api/check-reminders', async (req, res) => {
     res.json({ success: true, checked: cars.length, notifications });
 });
 
-// --- AI-чат ---
+// ============================================================
+// --- AI-ЧАТ ---
+// ============================================================
+
 function emulateAI(message, car) {
     const lowerMsg = message.toLowerCase();
     if (lowerMsg.includes('масло')) {
@@ -417,6 +444,10 @@ ${context}
     }
 });
 
+// ============================================================
+// ПЕРИОДИЧЕСКАЯ ПРОВЕРКА НАПОМИНАНИЙ
+// ============================================================
+
 const CHECK_INTERVAL_MS = CHECK_INTERVAL_HOURS * 60 * 60 * 1000;
 setInterval(async () => {
     const records = await loadRecords();
@@ -427,11 +458,25 @@ setInterval(async () => {
     }
 }, CHECK_INTERVAL_MS);
 
+setTimeout(async () => {
+    const records = await loadRecords();
+    const cars = await getCars();
+    for (const car of cars) {
+        const carRecords = records.filter(r => r.car === car);
+        checkAllReminders(carRecords, car);
+    }
+}, 5000);
+
+// ============================================================
+// ЗАПУСК СЕРВЕРА
+// ============================================================
+
 connectDB().then(() => {
     app.listen(PORT, () => {
         console.log(`🚀 Сервер запущен на порту ${PORT}`);
         console.log(`🛢️ Интервал замены масла: ${OIL_INTERVAL_KM} км`);
         console.log('📡 Мониторинг: /api/status (GET/POST)');
+        console.log('🤖 AI-чат: /api/chat');
     });
 }).catch(err => {
     console.error('Не удалось запустить сервер:', err);
