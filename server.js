@@ -17,8 +17,10 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const GIGACHAT_CREDENTIALS = process.env.GIGACHAT_CREDENTIALS;
 
 const CHECK_INTERVAL_HOURS = parseInt(process.env.CHECK_INTERVAL_HOURS) || 6;
+const OIL_INTERVAL_KM = 7000; // каждые 7000 км
+
 const REMINDER_TYPES = [
-    { type: 'Замена масла', km: parseInt(process.env.OIL_CHANGE_KM) || 10000, days: parseInt(process.env.OIL_CHANGE_DAYS) || 180 },
+    { type: 'Замена масла', km: OIL_INTERVAL_KM, days: parseInt(process.env.OIL_CHANGE_DAYS) || 180 },
     { type: 'Замена фильтра', km: parseInt(process.env.FILTER_CHANGE_KM) || 15000, days: parseInt(process.env.FILTER_CHANGE_DAYS) || 365 },
     { type: 'Замена ремня ГРМ', km: parseInt(process.env.BELT_CHANGE_KM) || 60000, days: parseInt(process.env.BELT_CHANGE_DAYS) || 0 },
 ].filter(t => t.km > 0 || t.days > 0);
@@ -29,7 +31,7 @@ let db;
 
 async function connectDB() {
     if (!DB_URL) {
-        console.warn('⚠️ DATABASE_URL не задан, работаем в режиме JSON (только для локального теста)');
+        console.warn('⚠️ DATABASE_URL не задан, работаем в режиме JSON');
         return;
     }
     try {
@@ -87,42 +89,11 @@ async function sendTelegramMessage(message) {
     }
 }
 
-function sendFullReport(records) {
-    if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
-    const cars = [...new Set(records.map(r => r.car).filter(Boolean))];
-    if (cars.length === 0) {
-        sendTelegramMessage("📋 В системе нет записей.");
-        return;
-    }
-    let message = "📊 <b>Сводка по всем автомобилям:</b>\n\n";
-    for (const car of cars) {
-        const carRecords = records.filter(r => r.car === car);
-        message += `<b>🚗 ${car}</b> (${carRecords.length} записей):\n`;
-        const sorted = carRecords.sort((a,b) => new Date(b.date) - new Date(a.date));
-        sorted.forEach(r => {
-            message += `  • ${r.mileage} км | ${r.part} | ${r.type} | ${r.description} (${r.dateLocale})\n`;
-        });
-        for (const t of REMINDER_TYPES) {
-            const last = getLastWork(carRecords, t.type);
-            if (last) {
-                const currentMileage = Math.max(...carRecords.map(r => r.mileage));
-                const kmDiff = currentMileage - last.mileage;
-                const daysDiff = Math.floor((Date.now() - new Date(last.date)) / (1000*60*60*24));
-                if ((t.km > 0 && kmDiff >= t.km) || (t.days > 0 && daysDiff >= t.days)) {
-                    message += `  ⚠️ <b>Нужна ${t.type}!</b> (пробег с замены: ${kmDiff} км, дней: ${daysDiff})\n`;
-                }
-            }
-        }
-        message += "\n";
-    }
-    if (message.length > 4000) {
-        message = message.substring(0, 4000) + "\n... (сообщение обрезано)";
-    }
-    sendTelegramMessage(message);
-}
-
 function getLastWork(records, type) {
-    const filtered = records.filter(r => r.type === type);
+    const filtered = records.filter(r =>
+        (r.type && r.type.toLowerCase().includes(type.toLowerCase())) ||
+        (r.description && r.description.toLowerCase().includes(type.toLowerCase()))
+    );
     if (filtered.length === 0) return null;
     return filtered.sort((a, b) => new Date(b.date) - new Date(a.date))[0];
 }
@@ -212,11 +183,133 @@ app.delete('/api/records/:id', async (req, res) => {
     res.json({ success: true });
 });
 
+// ============================================================
+// --- МОНИТОРИНГ СОСТОЯНИЯ ---
+// ============================================================
+
+async function getStatusCollection() {
+    if (!db) return null;
+    return db.collection('status');
+}
+
+app.post('/api/status', async (req, res) => {
+    try {
+        const {
+            rpm, speed, coolantTemp, engineLoad, throttlePos,
+            intakeTemp, voltage, fuelRate, oilTemp
+        } = req.body;
+
+        if (rpm === undefined) {
+            return res.status(400).json({ error: 'Нет данных для мониторинга' });
+        }
+
+        const statusData = {
+            rpm: Number(rpm) || 0,
+            speed: Number(speed) || 0,
+            coolantTemp: Number(coolantTemp) || 0,
+            engineLoad: Number(engineLoad) || 0,
+            throttlePos: Number(throttlePos) || 0,
+            intakeTemp: Number(intakeTemp) || 0,
+            voltage: Number(voltage) || 0,
+            fuelRate: Number(fuelRate) || 0,
+            oilTemp: Number(oilTemp) || 0,
+            timestamp: new Date().toISOString()
+        };
+
+        const collection = await getStatusCollection();
+        if (collection) {
+            await collection.deleteMany({});
+            await collection.insertOne(statusData);
+        } else {
+            global.lastStatus = statusData;
+        }
+
+        console.log('📡 Получен статус:', statusData);
+        res.json({ success: true, data: statusData });
+    } catch (e) {
+        console.error('Status POST error:', e.message);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+app.get('/api/status', async (req, res) => {
+    try {
+        const collection = await getStatusCollection();
+        let status = null;
+
+        if (collection) {
+            status = await collection.findOne({}, { sort: { timestamp: -1 } });
+        } else if (global.lastStatus) {
+            status = global.lastStatus;
+        }
+
+        if (!status) {
+            return res.json({
+                success: false,
+                message: 'Нет данных мониторинга. Подключите OBD2Manual.'
+            });
+        }
+
+        // === РАСЧЁТ ОСТАТКА ДО ЗАМЕНЫ МАСЛА ===
+        const records = await loadRecords();
+        const currentMileage = records.length
+            ? Math.max(...records.map(r => r.mileage))
+            : 0;
+
+        const oilChanges = records.filter(r =>
+            (r.type && r.type.toLowerCase().includes('масл')) ||
+            (r.description && r.description.toLowerCase().includes('масл'))
+        );
+        const lastOilChange = oilChanges.length
+            ? oilChanges.sort((a, b) => new Date(b.date) - new Date(a.date))[0]
+            : null;
+
+        let oilInfo = {
+            interval: OIL_INTERVAL_KM,
+            currentMileage: currentMileage,
+            lastChangeMileage: null,
+            kmSinceChange: null,
+            kmRemaining: null,
+            percentUsed: null,
+            lastChangeDate: null,
+            status: 'unknown'
+        };
+
+        if (lastOilChange) {
+            const kmSinceChange = currentMileage - lastOilChange.mileage;
+            const kmRemaining = Math.max(0, OIL_INTERVAL_KM - kmSinceChange);
+            const percentUsed = Math.min(100, Math.round((kmSinceChange / OIL_INTERVAL_KM) * 100));
+
+            oilInfo.lastChangeMileage = lastOilChange.mileage;
+            oilInfo.kmSinceChange = kmSinceChange;
+            oilInfo.kmRemaining = kmRemaining;
+            oilInfo.percentUsed = percentUsed;
+            oilInfo.lastChangeDate = lastOilChange.dateLocale || lastOilChange.date;
+
+            if (kmRemaining <= 0) oilInfo.status = 'overdue';
+            else if (kmRemaining <= 500) oilInfo.status = 'soon';
+            else oilInfo.status = 'ok';
+        }
+
+        const age = Date.now() - new Date(status.timestamp).getTime();
+        const isStale = age > 5 * 60 * 1000;
+
+        res.json({
+            success: true,
+            stale: isStale,
+            data: status,
+            oil: oilInfo
+        });
+    } catch (e) {
+        console.error('Status GET error:', e.message);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 app.post('/api/check-reminders', async (req, res) => {
     const records = await loadRecords();
     const cars = await getCars();
     let notifications = 0;
-    sendFullReport(records);
     for (const car of cars) {
         const carRecords = records.filter(r => r.car === car);
         const notified = checkAllReminders(carRecords, car);
@@ -225,11 +318,11 @@ app.post('/api/check-reminders', async (req, res) => {
     res.json({ success: true, checked: cars.length, notifications });
 });
 
-// --- AI-чат (GigaChat с автоподбором модели) ---
+// --- AI-чат ---
 function emulateAI(message, car) {
     const lowerMsg = message.toLowerCase();
-    if (lowerMsg.includes('масло') || lowerMsg.includes('замена масла')) {
-        return `Для автомобиля ${car} рекомендую менять масло каждые 10 000 км или раз в год. Учитывая текущий пробег, проверьте последнюю замену в ваших записях.`;
+    if (lowerMsg.includes('масло')) {
+        return `Для автомобиля ${car} рекомендую менять масло каждые ${OIL_INTERVAL_KM} км или раз в год. Учитывая текущий пробег, проверьте последнюю замену в ваших записях.`;
     }
     if (lowerMsg.includes('фильтр')) {
         return `Рекомендуется менять воздушный фильтр каждые 15 000 км, а салонный — раз в год. Для ${car} лучше придерживаться регламента производителя.`;
@@ -237,10 +330,7 @@ function emulateAI(message, car) {
     if (lowerMsg.includes('ремонт') || lowerMsg.includes('поломка')) {
         return `Для диагностики ${car} лучше обратиться к специалисту. Проверьте коды ошибок через OBD-адаптер.`;
     }
-    if (lowerMsg.includes('приора') || lowerMsg.includes('lada')) {
-        return `Для Lada Priora рекомендуется регулярно проверять состояние подвески и тормозной системы. Средний ресурс тормозных колодок — 30–40 тыс. км.`;
-    }
-    return `По вашему вопросу "${message}" для ${car} рекомендую ознакомиться с руководством по эксплуатации или обратиться к профессиональному автомеханику.`;
+    return `По вашему вопросу "${message}" для ${car} рекомендую обратиться к руководству по эксплуатации или к автомеханику.`;
 }
 
 const GIGA_MODELS = ['GigaChat-2-Pro', 'GigaChat'];
@@ -250,7 +340,6 @@ app.post('/api/chat', async (req, res) => {
     if (!message) return res.status(400).json({ error: 'Сообщение обязательно' });
 
     if (!GIGACHAT_CREDENTIALS) {
-        console.warn('⚠️ GIGACHAT_CREDENTIALS не задан, используется эмуляция.');
         const reply = emulateAI(message, car);
         return res.json({ reply });
     }
@@ -275,7 +364,6 @@ ${context}
     const agent = new https.Agent({ rejectUnauthorized: false });
 
     try {
-        // Получаем access_token
         const authResponse = await axios.post(
             'https://ngw.devices.sberbank.ru:9443/api/v2/oauth',
             'scope=GIGACHAT_API_PERS',
@@ -291,7 +379,6 @@ ${context}
         );
         const accessToken = authResponse.data.access_token;
 
-        // Пробуем модели по очереди
         for (const model of GIGA_MODELS) {
             try {
                 const chatResponse = await axios.post(
@@ -321,8 +408,6 @@ ${context}
             }
         }
 
-        // Если все модели не сработали
-        console.warn('⚠️ Все модели GigaChat недоступны, используется эмуляция.');
         const reply = emulateAI(message, car);
         res.json({ reply });
     } catch (error) {
@@ -342,25 +427,11 @@ setInterval(async () => {
     }
 }, CHECK_INTERVAL_MS);
 
-setTimeout(async () => {
-    const records = await loadRecords();
-    const cars = await getCars();
-    for (const car of cars) {
-        const carRecords = records.filter(r => r.car === car);
-        checkAllReminders(carRecords, car);
-    }
-}, 5000);
-
 connectDB().then(() => {
     app.listen(PORT, () => {
         console.log(`🚀 Сервер запущен на порту ${PORT}`);
-        console.log(`📏 Интервал проверки: ${CHECK_INTERVAL_HOURS} ч`);
-        console.log(`📋 Типы напоминаний: ${REMINDER_TYPES.map(t => t.type).join(', ')}`);
-        if (GIGACHAT_CREDENTIALS) {
-            console.log('🤖 GigaChat AI подключён (будет выбрана доступная модель)');
-        } else {
-            console.warn('⚠️ GIGACHAT_CREDENTIALS не задан, AI-чат работает в режиме эмуляции');
-        }
+        console.log(`🛢️ Интервал замены масла: ${OIL_INTERVAL_KM} км`);
+        console.log('📡 Мониторинг: /api/status (GET/POST)');
     });
 }).catch(err => {
     console.error('Не удалось запустить сервер:', err);
